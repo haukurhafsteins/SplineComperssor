@@ -1,7 +1,10 @@
 #pragma once
+#include <cstdio>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <vector>
+#include <algorithm>
 #include "SplineCompressor.hpp"
 
 float SplineCompressor::estimateEpsilon(const float* array, size_t size) {
@@ -59,24 +62,22 @@ size_t SplineCompressor::rdpSimplify(const float* array, size_t size, Point* out
     return count;
 }
 
-bool SplineCompressor::sampleSpline(const Point* control, size_t control_size, float* y_out, size_t sample_count, float* x_out) {
-    if (control_size < 2 || sample_count < 2 || !y_out) return false;
+bool SplineCompressor::sampleSpline(const Point* control, size_t control_size,
+    float* out, size_t sample_count,
+    float xStart, float xEnd) {
+    if (control_size < 2 || sample_count < 2 || !out) return false;
 
     size_t n = control_size - 1;
-    float* a = (float*)malloc(control_size * sizeof(float));
-    float* b = (float*)malloc(n * sizeof(float));
-    float* c = (float*)malloc(control_size * sizeof(float));
-    float* d = (float*)malloc(n * sizeof(float));
-    float* h = (float*)malloc(n * sizeof(float));
-    float* alpha = (float*)malloc(n * sizeof(float));
-    float* l = (float*)malloc(control_size * sizeof(float));
-    float* mu = (float*)malloc(control_size * sizeof(float));
-    float* z = (float*)malloc(control_size * sizeof(float));
 
-    if (!a || !b || !c || !d || !h || !alpha || !l || !mu || !z) {
-        freeAll(a, b, c, d, h, alpha, l, mu, z);
-        return false;
-    }
+    std::vector<float> a(control_size);
+    std::vector<float> b(n);
+    std::vector<float> c(control_size);
+    std::vector<float> d(n);
+    std::vector<float> h(n);
+    std::vector<float> alpha(n);
+    std::vector<float> l(control_size);
+    std::vector<float> mu(control_size);
+    std::vector<float> z(control_size);
 
     for (size_t i = 0; i < control_size; i++) a[i] = control[i].y;
     for (size_t i = 0; i < n; i++) h[i] = control[i + 1].x - control[i].x;
@@ -104,19 +105,20 @@ bool SplineCompressor::sampleSpline(const Point* control, size_t control_size, f
     float minX = control[0].x;
     float maxX = control[n].x;
     float step = (maxX - minX) / (sample_count - 1);
+    float scale = (xEnd - xStart) / (maxX - minX);  // mapping factor
 
     for (size_t i = 0; i < sample_count; i++) {
         float x = minX + i * step;
         size_t idx = findSegment(control, n, x);
         float dx = x - control[idx].x;
-        y_out[i] = a[idx] + b[idx] * dx + c[idx] * dx * dx + d[idx] * dx * dx * dx;
 
-        if (x_out) {
-            x_out[i] = x; // Fill optional x_out array
-        }
+        float y = a[idx] + b[idx] * dx + c[idx] * dx * dx + d[idx] * dx * dx * dx;
+
+        // Map x to output domain
+        out[i * 2] = xStart + (x - minX) * scale;
+        out[i * 2 + 1] = y;
     }
 
-    freeAll(a, b, c, d, h, alpha, l, mu, z);
     return true;
 }
 
@@ -157,10 +159,3 @@ size_t SplineCompressor::findSegment(const Point* points, size_t n, float x) {
     }
     return n - 1;
 }
-
-void SplineCompressor::freeAll(float* a, float* b, float* c, float* d,
-    float* h, float* alpha, float* l, float* mu, float* z) {
-    free(a); free(b); free(c); free(d);
-    free(h); free(alpha); free(l); free(mu); free(z);
-}
-
