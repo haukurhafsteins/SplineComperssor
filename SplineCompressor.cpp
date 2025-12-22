@@ -1,8 +1,9 @@
 #pragma once
-#include <cstdio>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <limits>
+#include <functional>
 #include <vector>
 #include <algorithm>
 #include "SplineCompressor.hpp"
@@ -35,12 +36,8 @@ float SplineCompressor::estimateEpsilon(const float* array, size_t size) {
 size_t SplineCompressor::rdpSimplify(const float* array, size_t size, Point* out, float epsilon, size_t max_out_size) {
     if (size < 2 || !out || max_out_size < 2) return 0;
 
-    bool* keep = (bool*)calloc(size, sizeof(bool));
-    Point* points = (Point*)malloc(size * sizeof(Point));
-    if (!keep || !points) {
-        free(keep); free(points);
-        return 0;
-    }
+    std::vector<bool> keep(size, false);
+    std::vector<Point> points(size);
 
     for (size_t i = 0; i < size; i++) {
         points[i] = { static_cast<float>(i), array[i] };
@@ -57,15 +54,13 @@ size_t SplineCompressor::rdpSimplify(const float* array, size_t size, Point* out
         }
     }
 
-    free(keep);
-    free(points);
     return count;
 }
 
-bool SplineCompressor::sampleSpline(const Point* control, size_t control_size,
-    float* out, size_t sample_count,
+size_t SplineCompressor::sampleSpline(const Point* control, size_t control_size,
+    float* out, size_t max_out_points,
     float xStart, float xEnd) {
-    if (control_size < 2 || sample_count < 2 || !out) return false;
+    if (control_size < 2 || max_out_points < 2 || !out) return 0;
 
     size_t n = control_size - 1;
 
@@ -102,30 +97,71 @@ bool SplineCompressor::sampleSpline(const Point* control, size_t control_size,
         d[j] = (c[j + 1] - c[j]) / (3.0f * h[j]);
     }
 
+    auto evalSpline = [&](size_t idx, float x) -> float {
+        float dx = x - control[idx].x;
+        return a[idx] + b[idx] * dx + c[idx] * dx * dx + d[idx] * dx * dx * dx;
+    };
+
     float minX = control[0].x;
     float maxX = control[n].x;
-    float step = (maxX - minX) / (sample_count - 1);
     float scale = (xEnd - xStart) / (maxX - minX);  // mapping factor
 
-    for (size_t i = 0; i < sample_count; i++) {
-        float x = minX + i * step;
-        size_t idx = findSegment(control, n, x);
-        float dx = x - control[idx].x;
+    float minY = std::numeric_limits<float>::max();
+    float maxY = std::numeric_limits<float>::lowest();
+    for (size_t i = 0; i < control_size; i++) {
+        minY = std::min(minY, control[i].y);
+        maxY = std::max(maxY, control[i].y);
+    }
+    float tolerance = std::max(0.01f * (maxY - minY), 0.001f); // adaptive density target
 
-        float y = a[idx] + b[idx] * dx + c[idx] * dx * dx + d[idx] * dx * dx * dx;
+    auto mapX = [&](float x) -> float {
+        return xStart + (x - minX) * scale;
+    };
 
-        // Map x to output domain
-        out[i * 2] = xStart + (x - minX) * scale;
-        out[i * 2 + 1] = y;
+    std::vector<Point> sampled;
+    sampled.reserve(max_out_points);
+    sampled.push_back({ mapX(minX), control[0].y });
+
+    std::function<void(size_t, float, float, float, float)> appendAdaptive =
+        [&](size_t idx, float x0, float y0, float x1, float y1) {
+            float midX = 0.5f * (x0 + x1);
+            float midY = evalSpline(idx, midX);
+            float linMid = y0 + (y1 - y0) * 0.5f;
+            float error = std::fabs(midY - linMid);
+
+            if (error > tolerance && sampled.size() + 1 < max_out_points) {
+                appendAdaptive(idx, x0, y0, midX, midY);
+                appendAdaptive(idx, midX, midY, x1, y1);
+            } else {
+                if (sampled.size() < max_out_points) {
+                    sampled.push_back({ mapX(x1), y1 });
+                } else {
+                    sampled.back() = { mapX(x1), y1 };
+                }
+            }
+        };
+
+    for (size_t i = 0; i < n && sampled.size() < max_out_points; i++) {
+        float x0 = control[i].x;
+        float y0 = control[i].y;
+        float x1 = control[i + 1].x;
+        float y1 = evalSpline(i, x1); // ensure continuity with spline coefficients
+        appendAdaptive(i, x0, y0, x1, y1);
     }
 
-    return true;
+    size_t outCount = std::min(sampled.size(), max_out_points);
+    for (size_t i = 0; i < outCount; i++) {
+        out[i * 2] = sampled[i].x;
+        out[i * 2 + 1] = sampled[i].y;
+    }
+
+    return outCount;
 }
 
 //---------------------------------------------------------
 // Private functions
 //---------------------------------------------------------
-void SplineCompressor::recursiveRdp(Point* pts, size_t start, size_t end, float epsilon, bool* keep) {
+void SplineCompressor::recursiveRdp(std::vector<Point>& pts, size_t start, size_t end, float epsilon, std::vector<bool>& keep) {
     if (end <= start + 1) return;
 
     float maxDist = 0.0f;
@@ -151,11 +187,4 @@ float SplineCompressor::perpendicularDistance(Point p, Point start, Point end) {
     float num = std::fabs(dy * p.x - dx * p.y + end.x * start.y - end.y * start.x);
     float denom = std::sqrt(dx * dx + dy * dy);
     return num / (denom + 1e-6f);
-}
-
-size_t SplineCompressor::findSegment(const Point* points, size_t n, float x) {
-    for (size_t i = 0; i < n; i++) {
-        if (x < points[i + 1].x) return i;
-    }
-    return n - 1;
 }
